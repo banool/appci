@@ -56,6 +56,8 @@ Key material lives in `~/creds` (see its README); repo-local gitignored files ar
 - `android/key.properties` — keystore passwords + `storeFile` → `~/creds/<app>_upload_keystore.jks`. Gradle reads this file directly, which is why it stays in-repo.
 - Play service-account JSONs: `~/creds/play_<app>.json`, pointed at by the wrappers via `PLAY_SERVICE_ACCOUNT_JSON_PATH`.
 
+**Play Console gotcha:** creating the service account + key in GCP is not enough — the service account's email must also be granted access **per app** in the Play Console (Users and permissions → Invite new users → add the service-account email → grant it the app with release permissions), and `androidpublisher.googleapis.com` must be enabled on the GCP project. Until the app-level grant exists, every Android Publisher API call fails with 403 "The caller does not have permission", which looks exactly like a bad key but isn't.
+
 **GitHub Actions secrets are a mirror of the local files, never the source of truth.** `scripts/sync_gha_secrets.sh <app>|--all` pushes them up with `gh secret set` and warns about unrecognized (probably stale) secrets. Rotating a credential = update `~/creds`, re-run it. Secrets per app repo:
 
 | Secret | Contents |
