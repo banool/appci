@@ -1,0 +1,147 @@
+#!/bin/bash
+#
+# Mini CLI for releasing the three apps. Picks one app, one platform, one
+# stage, and one operator (local machine vs GitHub Actions), then runs the
+# right wrapper or dispatches the right workflow. Any flag you omit is asked
+# for interactively — there is deliberately no "all" option.
+#
+# Usage:
+#   appci [--app auslan|slsl|kombio] [--platform ios|android]
+#         [--stage internal|beta|external] [--operator local|gha]
+#         [-n|--print] [-- <extra args>]
+#
+#   --stage internal   build + upload an internal build (TestFlight / Play internal)
+#   --stage beta       promote the latest internal build to the beta audience
+#   --stage external   promote the latest internal build to the general public
+#   -n / --print       show the command that would run, without running it
+#
+# Extra args after `--` are passed through to the underlying command: promote
+# flags for local promotes (e.g. -- --dry-run notes.txt), `-f name=value`
+# workflow inputs for gha (e.g. -- -f dry_run=true -f rollout=0.2).
+
+set -euo pipefail
+
+# Resolve through symlinks (this is usually run via a symlink on PATH) so the
+# sibling app repos are found relative to the real checkout.
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+APPCI_ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+GITHUB_DIR="$(cd "$APPCI_ROOT/.." && pwd)"
+
+APP="" PLATFORM="" STAGE="" OPERATOR="" PRINT_ONLY=0
+EXTRA=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --app) APP="${2:-}"; shift 2 ;;
+    --app=*) APP="${1#--app=}"; shift ;;
+    --platform) PLATFORM="${2:-}"; shift 2 ;;
+    --platform=*) PLATFORM="${1#--platform=}"; shift ;;
+    --stage) STAGE="${2:-}"; shift 2 ;;
+    --stage=*) STAGE="${1#--stage=}"; shift ;;
+    --operator) OPERATOR="${2:-}"; shift 2 ;;
+    --operator=*) OPERATOR="${1#--operator=}"; shift ;;
+    -n|--print) PRINT_ONLY=1; shift ;;
+    -h|--help) sed -n '3,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --) shift; EXTRA=("$@"); break ;;
+    *) echo "unknown argument: $1 (see --help)" >&2; exit 1 ;;
+  esac
+done
+
+# Ask for a missing/invalid value with a numbered menu.
+choose() {
+  local var="$1" prompt="$2"; shift 2
+  local current="${!var}" flag opt
+  flag="$(tr '[:upper:]' '[:lower:]' <<<"$var")"
+  for opt in "$@"; do
+    [[ "$current" == "$opt" ]] && return 0
+  done
+  [[ -n "$current" ]] && echo "invalid --$flag: $current (want: $*)" >&2
+  if ! { : </dev/tty; } 2>/dev/null; then
+    echo "missing --$flag and no terminal to prompt on (want: $*)" >&2
+    exit 1
+  fi
+  PS3="$prompt: "
+  select opt in "$@"; do
+    [[ -n "${opt:-}" ]] && { printf -v "$var" '%s' "$opt"; break; }
+  done </dev/tty
+}
+
+choose APP "app" auslan slsl kombio
+choose PLATFORM "platform" ios android
+choose STAGE "stage" internal beta external
+choose OPERATOR "operator" local gha
+
+case "$APP" in
+  auslan) REPO=banool/auslan_dictionary; REPO_DIR="$GITHUB_DIR/auslan_dictionary"; APP_DIR="$REPO_DIR" ;;
+  slsl)   REPO=banool/slsl_dictionary; REPO_DIR="$GITHUB_DIR/slsl_dictionary"; APP_DIR="$REPO_DIR/frontend" ;;
+  kombio) REPO=banool/kombio_scorekeeper; REPO_DIR="$GITHUB_DIR/kombio_scorekeeper"; APP_DIR="$REPO_DIR" ;;
+esac
+
+run() {
+  echo "==> $*"
+  [[ "$PRINT_ONLY" == 1 ]] && return 0
+  "$@"
+}
+
+# A gha operation builds/reads the pushed default branch, not the working
+# tree — warn when they differ so a stale dispatch doesn't surprise you.
+warn_if_unpushed() {
+  local dirty ahead
+  dirty="$(git -C "$REPO_DIR" status --porcelain 2>/dev/null | head -1 || true)"
+  ahead="$(git -C "$REPO_DIR" rev-list --count '@{upstream}..HEAD' 2>/dev/null || echo 0)"
+  if [[ -n "$dirty" || "$ahead" != 0 ]]; then
+    echo "WARNING: $REPO_DIR has uncommitted or unpushed work — the gha run uses the pushed branch, not this tree." >&2
+  fi
+}
+
+# After a dispatch, surface the run so it's one click/command away.
+show_run() {
+  [[ "$PRINT_ONLY" == 1 ]] && return 0
+  local workflow="$1" url
+  sleep 3
+  url="$(gh run list -R "$REPO" --workflow "$workflow" -L1 --json url --jq '.[0].url' 2>/dev/null || true)"
+  [[ -n "$url" ]] && echo "run: $url (watch with: gh run watch -R $REPO)"
+}
+
+if [[ "$STAGE" == internal ]]; then
+  if [[ "$OPERATOR" == local ]]; then
+    case "$PLATFORM" in
+      ios) run "$APP_DIR/ios/upload.sh" "${EXTRA[@]:+${EXTRA[@]}}" ;;
+      android) run "$APP_DIR/android/upload.sh" "${EXTRA[@]:+${EXTRA[@]}}" ;;
+    esac
+  else
+    warn_if_unpushed
+    case "$PLATFORM" in
+      ios) WF="iOS upload (TestFlight internal)" ;;
+      android) WF="Android upload (Play internal)" ;;
+    esac
+    run gh workflow run "$WF" -R "$REPO" "${EXTRA[@]:+${EXTRA[@]}}"
+    show_run "$WF"
+  fi
+else
+  if [[ "$OPERATOR" == local ]]; then
+    case "$PLATFORM" in
+      ios) ONLY=--ios-only ;;
+      android) ONLY=--android-only ;;
+    esac
+    run "$APP_DIR/promote.sh" --stage "$STAGE" "$ONLY" "${EXTRA[@]:+${EXTRA[@]}}"
+  else
+    warn_if_unpushed
+    NOTES=""
+    # The Promote workflow requires "What to Test" notes for beta and falls
+    # back to a generic default for external.
+    if [[ "$PRINT_ONLY" == 1 ]]; then
+      NOTES="<notes>"
+    elif [[ ! " ${EXTRA[*]:-} " == *" notes="* ]]; then
+      if [[ "$STAGE" == beta ]]; then
+        read -r -p "Release notes (required for beta): " NOTES </dev/tty
+        [[ -n "${NOTES//[[:space:]]/}" ]] || { echo "beta needs notes — aborting." >&2; exit 1; }
+      else
+        read -r -p "Release notes (blank = generic default): " NOTES </dev/tty
+      fi
+    fi
+    run gh workflow run Promote -R "$REPO" \
+      -f "stage=$STAGE" -f "platform=$PLATFORM" -f "notes=$NOTES" \
+      "${EXTRA[@]:+${EXTRA[@]}}"
+    show_run Promote
+  fi
+fi

@@ -10,6 +10,16 @@ Everything here exists so each app can do three things, both locally and via Git
 
 No fastlane anywhere: everything is bash + stdlib Python, with JWTs signed via the `openssl` CLI.
 
+## The CLI
+
+`bin/appci` (symlinked at `/opt/homebrew/bin/appci`) is the front door for all of the above:
+
+```
+appci --app auslan --platform ios --stage internal --operator gha
+```
+
+One app, one platform, one stage (`internal` = build+upload, `beta`/`external` = promote), one operator (`local` runs the wrapper in the app checkout; `gha` dispatches the matching workflow with `gh`). Any flag you omit is asked for interactively — there is deliberately no "all" option. `-n`/`--print` shows the command without running it; args after `--` pass through to the underlying command (promote flags locally, `-f name=value` workflow inputs for gha). For gha it warns when the repo has uncommitted/unpushed work (the run builds the pushed branch) and prints the dispatched run's URL.
+
 ## How apps consume this
 
 **Scripts** are resolved via the sibling-checkout convention: clone this repo next to the app repo, or set `APPCI_DIR`. Each app carries thin wrappers that set the app-specific env and exec the canonical script here:
@@ -34,7 +44,7 @@ No fastlane anywhere: everything is bash + stdlib Python, with JWTs signed via t
 | `app-web-deploy.yaml` | Flutter web → Cloudflare Pages | dictionary apps only |
 | `app-pages-deploy.yaml` | static site → Cloudflare Pages | dictionary apps only |
 
-The auslan/slsl callers trigger the release workflows automatically on push (public repos, free minutes); kombio is `workflow_dispatch`-only (private repo, macOS minutes bill at 10x). Callers own concurrency: push-triggered callers use `cancel-in-progress: true`, dispatch upload/promote callers use `cancel-in-progress: false` (never cancel a mid-flight store operation).
+Store uploads and promotes are `workflow_dispatch`-only in all three apps — pushes run tests (and the dictionary apps' web/pages deploys and auslan's GitHub-release APK) but never touch the stores. Each app carries thin dispatch callers named **iOS upload (TestFlight internal)**, **Android upload (Play internal)**, and **Promote** — the names the CLI dispatches by. Callers own concurrency: push-triggered callers use `cancel-in-progress: true`, dispatch upload/promote callers use `cancel-in-progress: false` (never cancel a mid-flight store operation).
 
 `scripts/preflight.py` guards every upload and promote: it refuses version strings the App Store would treat as downgrades, build numbers either store has already seen, and promotes where pubspec has drifted from the uploaded build (a commit between upload and promote strands the build). `PLAY_SKIP_PREFLIGHT=1` / `--no-submit`-style escape hatches exist per script.
 

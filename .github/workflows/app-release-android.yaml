@@ -4,9 +4,10 @@
 # With upload=true (the default) it writes the signing material, runs the
 # tests, builds a signed appbundle, and uploads it to the Play internal track
 # via scripts/play_upload.py — the same code path as the local
-# android/upload.sh, including the preflight version gate.
-# With upload=false it only runs the tests — the mode app CIs use for PRs and
-# data-only changes.
+# android/upload.sh, including the preflight version gate. That mode is used
+# by the apps' manual "Android upload" dispatch workflows.
+# With upload=false it only runs the tests — the mode the apps' push CI uses
+# (store uploads never happen from pushes).
 #
 # Note: the Play upload doesn't work until a single manual upload has been done
 # on the Google Play Console UI (see https://stackoverflow.com/a/69899877/3846032).
