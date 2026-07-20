@@ -31,6 +31,11 @@ API = "https://api.appstoreconnect.apple.com"
 LOCALE = "en-US"
 POLL_TIMEOUT_S = 30 * 60
 POLL_INTERVAL_S = 30
+# How long a build may stay completely invisible before we conclude it was
+# never uploaded. Ingestion normally surfaces a fresh upload (as PROCESSING)
+# within a couple of minutes; the full POLL_TIMEOUT_S is only for builds that
+# are visible and still processing.
+NOT_VISIBLE_TIMEOUT_S = 10 * 60
 
 
 def die(msg):
@@ -151,7 +156,8 @@ def main():
 
     # 2. Find the build and wait for it to finish processing.
     print(f"[appstore_beta] waiting for build {build_number} to finish processing...")
-    deadline = time.time() + POLL_TIMEOUT_S
+    start = time.time()
+    deadline = start + POLL_TIMEOUT_S
     build_id = None
     while time.time() < deadline:
         st, data = api(
@@ -176,6 +182,41 @@ def main():
             if state in ("INVALID", "FAILED"):
                 die(f"build {build_number} failed processing ({state})")
         else:
+            # Distinguish "just uploaded, still ingesting" from "never
+            # uploaded". If TestFlight already has a NEWER build number, this
+            # one is never going to appear — the pubspec moved past a build
+            # that was never uploaded — so don't burn the full timeout.
+            st2, latest = api(
+                token,
+                "GET",
+                "/v1/builds",
+                params={
+                    "filter[app]": app_id,
+                    "sort": "-uploadedDate",
+                    "limit": "1",
+                    "fields[builds]": "version",
+                },
+            )
+            newest = None
+            if st2 == 200 and latest.get("data"):
+                newest = latest["data"][0]["attributes"].get("version")
+            try:
+                if newest is not None and int(newest) > int(build_number):
+                    die(
+                        f"build {build_number} is not on TestFlight and the newest "
+                        f"uploaded build is already {newest} — {build_number} was "
+                        "never uploaded (or its number was skipped). Upload first "
+                        "(ios/upload.sh), or promote the build that actually exists."
+                    )
+            except ValueError:
+                pass  # non-numeric build number: fall through to the timeout
+            if time.time() - start > NOT_VISIBLE_TIMEOUT_S:
+                die(
+                    f"build {build_number} never appeared on TestFlight after "
+                    f"{NOT_VISIBLE_TIMEOUT_S // 60} minutes (newest visible: "
+                    f"{newest or 'none'}) — it was probably never uploaded. "
+                    "Upload first (ios/upload.sh)."
+                )
             print("  not visible yet (App Store Connect is still ingesting it)...")
         time.sleep(POLL_INTERVAL_S)
     if not build_id:
