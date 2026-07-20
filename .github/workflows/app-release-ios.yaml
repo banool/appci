@@ -1,0 +1,131 @@
+# Reusable iOS build+upload job: builds the app and uploads it to the internal
+# TestFlight track. Called from each app's CI via
+# `uses: banool/appci/.github/workflows/app-release-ios.yaml@main`.
+#
+# Why build in CI at all: App Store Connect rejects binaries built on a
+# prerelease macOS with "ITMS-90111: Unsupported SDK or Xcode version", even
+# when Xcode itself is the current release — it is the build *environment* it
+# objects to, and there is no local workaround. GitHub's macOS runners run
+# release macOS, so building here sidesteps it entirely.
+#
+# This ONLY uploads (the build lands on the internal TestFlight track).
+# Promotion to beta or the public is app-promote.yaml (or a local ./promote.sh).
+#
+# It runs the app's own ios/upload.sh wrapper (which sets UPLOAD_BUNDLE_ID and
+# execs appci's scripts/ios_upload.sh), so the app identity has a single source
+# of truth. The team_id input only populates ios/secrets.env — the id actually
+# used for signing comes from the app's project.pbxproj / ExportOptions.plist,
+# and it is not a secret (it is in those committed files already).
+name: App iOS release
+
+on:
+  workflow_call:
+    inputs:
+      team_id:
+        type: string
+        required: true
+        description: Apple Team ID, e.g. 9N3SNHTGL7.
+      working_directory:
+        type: string
+        default: '.'
+        description: Directory holding the Flutter app (e.g. frontend for slsl).
+      flutter_version:
+        type: string
+        default: '3.44.5'
+      timeout_minutes:
+        type: number
+        default: 60
+    secrets:
+      # Required in practice; declared optional so callers with empty secrets
+      # fail at the credential-write step's key check, not the call.
+      APP_STORE_CONNECT_API_KEY_P8:
+        required: false
+      APP_STORE_CONNECT_API_KEY_ID:
+        required: false
+      APP_STORE_CONNECT_API_ISSUER_ID:
+        required: false
+
+jobs:
+  release_ios:
+    # Apple requires Xcode 26 with an iOS 26 SDK. macos-15 is the newest image
+    # guaranteed to carry a release Xcode 26; the "Select Xcode" step below
+    # asserts what it actually picked rather than trusting the default.
+    runs-on: macos-15
+    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: banool/appci
+          path: appci
+
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          echo "Xcodes available on this runner:"
+          ls -d /Applications/Xcode*.app
+          # Prefer the newest Xcode 26.x; fall back to the newest of any version
+          # so a runner image change surfaces as a clear version print below
+          # rather than a silent wrong-SDK build.
+          XC="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)"
+          if [[ -z "$XC" ]]; then
+            XC="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+            echo "WARNING: no Xcode 26.x on this image; falling back to $XC" >&2
+          fi
+          echo "Using $XC"
+          sudo xcode-select -s "$XC/Contents/Developer"
+          xcodebuild -version
+          xcodebuild -showsdks | grep -i iphoneos
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ inputs.flutter_version }}
+          channel: stable
+          cache: true
+
+      - name: Show Flutter version
+        run: flutter --version
+
+      - name: Write App Store Connect credentials
+        env:
+          ASC_KEY_P8: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+          TEAM_ID: ${{ inputs.team_id }}
+        run: |
+          set -euo pipefail
+          # Recreate the same layout the scripts expect locally: the key on disk
+          # named AuthKey_<ID>.p8 (the scripts derive the key id from the
+          # filename, since Apple encodes it nowhere else), plus ios/secrets.env.
+          mkdir -p "$HOME/creds"
+          printf '%s\n' "$ASC_KEY_P8" > "$HOME/creds/AuthKey_${ASC_KEY_ID}.p8"
+          chmod 600 "$HOME/creds/AuthKey_${ASC_KEY_ID}.p8"
+          cat > ios/secrets.env <<EOF
+          export TEAM_ID='${TEAM_ID}'
+          export APP_STORE_CONNECT_API_ISSUER_ID='${ASC_ISSUER_ID}'
+          export API_KEY_PATH="\$HOME/creds/AuthKey_${ASC_KEY_ID}.p8"
+          EOF
+          # Fail loudly here rather than 10 minutes into an archive.
+          openssl ec -in "$HOME/creds/AuthKey_${ASC_KEY_ID}.p8" -noout \
+            && echo "key parses OK"
+
+      - name: Build and upload to TestFlight
+        # The runner's keychain is empty, so there is nothing revoked or expired
+        # to sweep; skipping avoids any chance of a keychain prompt hanging the job.
+        env:
+          SKIP_CERT_CLEANUP: '1'
+          APPCI_DIR: ${{ github.workspace }}/appci
+        run: ./ios/upload.sh
+
+      - name: Remove credentials from the runner
+        # Runners are ephemeral, but do not leave a private key sitting in the
+        # workspace if a later step is ever added. Workspace-anchored so this
+        # works even when an earlier step failed before checkout.
+        if: always()
+        working-directory: .
+        run: rm -f "$HOME"/creds/AuthKey_*.p8 "$GITHUB_WORKSPACE/${{ inputs.working_directory }}/ios/secrets.env"

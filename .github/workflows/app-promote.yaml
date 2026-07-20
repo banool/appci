@@ -1,0 +1,136 @@
+# Reusable promote job: sends an already-uploaded build to a wider audience on
+# either or both stores, by running the app's own promote.sh wrapper (which
+# sets the PROMOTE_* identity env and execs appci's scripts/promote.sh). Called
+# from each app's promote.yaml (workflow_dispatch) via
+# `uses: banool/appci/.github/workflows/app-promote.yaml@main`.
+#
+# Runs on ubuntu: the iOS promotion only talks to the App Store Connect API
+# (stdlib python + openssl — nothing is compiled), so no macOS runner is
+# needed.
+#
+# Credentials: promote.sh sources <app>/ios/secrets.env and that file wins over
+# exported env, so this workflow writes the same local layout the scripts
+# expect (key in ~/creds, pointer in ios/secrets.env) rather than exporting
+# variables.
+name: App promote
+
+on:
+  workflow_call:
+    inputs:
+      stage:
+        type: string
+        required: true
+        description: beta (TestFlight group + Play beta track) or external (App Store + Play production).
+      platform:
+        type: string
+        default: 'both'
+        description: both | ios | android.
+      notes:
+        type: string
+        default: ''
+        description: Release notes ("What to Test" for beta, "What's New" for external). Required for beta.
+      rollout:
+        type: string
+        default: ''
+        description: Android staged rollout fraction, e.g. 0.2. Empty = 100%.
+      dry_run:
+        type: boolean
+        default: false
+        description: Plan only; touch nothing on either store.
+      working_directory:
+        type: string
+        default: '.'
+        description: Directory holding the Flutter app (e.g. frontend for slsl).
+    secrets:
+      APP_STORE_CONNECT_API_KEY_P8:
+        required: false
+      APP_STORE_CONNECT_API_KEY_ID:
+        required: false
+      APP_STORE_CONNECT_API_ISSUER_ID:
+        required: false
+      ANDROID_SERVICE_ACCOUNT_JSON:
+        required: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+    steps:
+      - name: Validate inputs
+        working-directory: .
+        env:
+          STAGE: ${{ inputs.stage }}
+          PLATFORM: ${{ inputs.platform }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          set -euo pipefail
+          case "$STAGE" in beta|external) ;; *) echo "stage must be beta or external, got '$STAGE'" >&2; exit 1 ;; esac
+          case "$PLATFORM" in both|ios|android) ;; *) echo "platform must be both, ios, or android, got '$PLATFORM'" >&2; exit 1 ;; esac
+          # promote.sh prompts interactively for beta notes, which on a runner's
+          # null stdin means a late EOF abort — fail up front instead.
+          if [[ "$STAGE" == beta && -z "${NOTES//[[:space:]]/}" ]]; then
+            echo "notes is required for stage=beta (external TestFlight testers require 'What to Test' notes)" >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: banool/appci
+          path: appci
+
+      - name: Write App Store Connect credentials
+        if: inputs.platform != 'android'
+        env:
+          ASC_KEY_P8: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/creds"
+          printf '%s\n' "$ASC_KEY_P8" > "$HOME/creds/AuthKey_${ASC_KEY_ID}.p8"
+          chmod 600 "$HOME/creds/AuthKey_${ASC_KEY_ID}.p8"
+          cat > ios/secrets.env <<EOF
+          export APP_STORE_CONNECT_API_ISSUER_ID='${ASC_ISSUER_ID}'
+          export API_KEY_PATH="\$HOME/creds/AuthKey_${ASC_KEY_ID}.p8"
+          EOF
+          openssl ec -in "$HOME/creds/AuthKey_${ASC_KEY_ID}.p8" -noout \
+            && echo "key parses OK"
+
+      - name: Write Play service-account key
+        if: inputs.platform != 'ios'
+        env:
+          PLAY_KEY: ${{ secrets.ANDROID_SERVICE_ACCOUNT_JSON }}
+        run: printf '%s' "$PLAY_KEY" > "$RUNNER_TEMP/play_key.json"
+
+      - name: Promote
+        env:
+          STAGE: ${{ inputs.stage }}
+          PLATFORM: ${{ inputs.platform }}
+          NOTES: ${{ inputs.notes }}
+          ROLLOUT: ${{ inputs.rollout }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          APPCI_DIR: ${{ github.workspace }}/appci
+          PLAY_SERVICE_ACCOUNT_JSON_PATH: ${{ runner.temp }}/play_key.json
+        run: |
+          set -euo pipefail
+          args=(--stage "$STAGE" --yes)
+          [[ "$DRY_RUN" == "true" ]] && args+=(--dry-run)
+          [[ "$PLATFORM" == "ios" ]] && args+=(--ios-only)
+          [[ "$PLATFORM" == "android" ]] && args+=(--android-only)
+          [[ -n "$ROLLOUT" ]] && args+=(--rollout="$ROLLOUT")
+          if [[ -n "${NOTES//[[:space:]]/}" ]]; then
+            printf '%s\n' "$NOTES" > "$RUNNER_TEMP/notes.txt"
+            args+=("$RUNNER_TEMP/notes.txt")
+          fi
+          ./promote.sh "${args[@]}"
+
+      - name: Remove credentials from the runner
+        if: always()
+        # Workspace-anchored so this works even when an earlier step failed
+        # before the checkout created the working directory.
+        working-directory: .
+        run: rm -f "$HOME"/creds/AuthKey_*.p8 "$GITHUB_WORKSPACE/${{ inputs.working_directory }}/ios/secrets.env" "$RUNNER_TEMP/play_key.json"

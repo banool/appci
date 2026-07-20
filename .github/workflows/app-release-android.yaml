@@ -1,0 +1,107 @@
+# Reusable Android test/build/release job for the apps. Called from each app's
+# CI via `uses: banool/appci/.github/workflows/app-release-android.yaml@main`.
+#
+# With upload=true (the default) it writes the signing material, runs the
+# tests, builds a signed appbundle, and uploads it to the Play internal track
+# via scripts/play_upload.py — the same code path as the local
+# android/upload.sh, including the preflight version gate.
+# With upload=false it only runs the tests — the mode app CIs use for PRs and
+# data-only changes.
+#
+# Note: the Play upload doesn't work until a single manual upload has been done
+# on the Google Play Console UI (see https://stackoverflow.com/a/69899877/3846032).
+name: App Android release
+
+on:
+  workflow_call:
+    inputs:
+      package_name:
+        type: string
+        required: true
+        description: Android applicationId, e.g. com.banool.auslan_dictionary.
+      working_directory:
+        type: string
+        default: '.'
+        description: Directory holding the Flutter app (e.g. frontend for slsl).
+      flutter_version:
+        type: string
+        default: '3.44.5'
+      upload:
+        type: boolean
+        default: true
+        description: false = test-only (no signing material, no build, no upload).
+      release_notes:
+        type: string
+        default: 'Internal build.'
+        description: Release notes for the internal-track release.
+    secrets:
+      # Required in practice when upload=true; declared optional so callers
+      # with empty secrets (fork PRs) fail at the signing step, not the call.
+      UPLOAD_KEYSTORE:
+        required: false
+      KEY_PROPERTIES:
+        required: false
+      ANDROID_SERVICE_ACCOUNT_JSON:
+        required: false
+
+jobs:
+  release_android:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: banool/appci
+          path: appci
+
+      - run: echo "${{ secrets.UPLOAD_KEYSTORE }}" | base64 -d > android/upload_keystore.jks
+        if: inputs.upload
+      - run: echo "${{ secrets.KEY_PROPERTIES }}" | base64 -d > android/key.properties
+        if: inputs.upload
+      - name: Write Play service-account key
+        if: inputs.upload
+        env:
+          PLAY_KEY: ${{ secrets.ANDROID_SERVICE_ACCOUNT_JSON }}
+        run: printf '%s' "$PLAY_KEY" > "$RUNNER_TEMP/play_key.json"
+
+      - uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ inputs.flutter_version }}
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      - run: flutter test
+
+      # Fail in seconds (version code already used, etc.) instead of after a
+      # multi-minute build.
+      - name: Preflight version check
+        if: inputs.upload
+        env:
+          PLAY_SERVICE_ACCOUNT_JSON_PATH: ${{ runner.temp }}/play_key.json
+          PLAY_PACKAGE_NAME: ${{ inputs.package_name }}
+        run: python3 "$GITHUB_WORKSPACE/appci/scripts/preflight.py" --android-only
+
+      # This will produce a signed appbundle.
+      - run: flutter build appbundle
+        if: inputs.upload
+
+      - name: Upload Android build to internal track
+        if: inputs.upload
+        env:
+          PLAY_SERVICE_ACCOUNT_JSON_PATH: ${{ runner.temp }}/play_key.json
+          PLAY_PACKAGE_NAME: ${{ inputs.package_name }}
+          PLAY_RELEASE_NOTES: ${{ inputs.release_notes }}
+          # The preflight step above already ran.
+          PLAY_SKIP_PREFLIGHT: '1'
+        run: python3 "$GITHUB_WORKSPACE/appci/scripts/play_upload.py"
