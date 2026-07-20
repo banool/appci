@@ -18,7 +18,9 @@ jobs:
       # the honest check.
       - run: python3 -m compileall -q scripts/
       # Lint the reusable workflows — they're the main artifact apps consume.
+      # Info-level shellcheck findings are style-only; warnings and up gate,
+      # matching the -S warning stance of the shellcheck step above.
       - name: actionlint
         uses: docker://rhysd/actionlint:1.7.7
         with:
-          args: -color
+          args: -color -ignore 'SC[0-9]+:info:'
