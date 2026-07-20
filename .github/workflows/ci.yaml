@@ -1,0 +1,24 @@
+# Self-CI for the tooling itself. Everything else in .github/workflows is
+# workflow_call-only, so without this a push to appci runs nothing.
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # ubuntu-latest ships shellcheck. -s bash: bump_version.sh is a bash
+      # snippet with no shebang. -S warning: bugs, not style.
+      - run: shellcheck -s bash -S warning bin/appci scripts/*.sh
+      # The Python scripts are stdlib-only with no test suite; a syntax gate is
+      # the honest check.
+      - run: python3 -m compileall -q scripts/
+      # Lint the reusable workflows — they're the main artifact apps consume.
+      - name: actionlint
+        uses: docker://rhysd/actionlint:1.7.7
+        with:
+          args: -color
