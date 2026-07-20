@@ -23,4 +23,5 @@ jobs:
       - name: actionlint
         uses: docker://rhysd/actionlint:1.7.7
         with:
-          args: -color -ignore 'SC[0-9]+:info:'
+          # No quotes: docker action args get no shell quote-stripping.
+          args: -color -ignore SC[0-9]+:info:
