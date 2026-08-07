@@ -26,7 +26,7 @@ on:
         description: Directory holding the Flutter app (e.g. frontend for slsl).
       flutter_version:
         type: string
-        default: '3.44.5'
+        default: '3.44.9'
       upload:
         type: boolean
         default: true
