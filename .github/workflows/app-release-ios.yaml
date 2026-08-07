@@ -114,6 +114,17 @@ jobs:
           openssl ec -in "$HOME/creds/AuthKey_${ASC_KEY_ID}.p8" -noout \
             && echo "key parses OK"
 
+      - name: Record the certificates that already exist
+        # Paired with the sweep below. Anything that appears between the two is
+        # this run's doing, and only that is revoked.
+        env:
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+        run: |
+          export API_KEY_PATH="$HOME/creds/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8"
+          python3 "$GITHUB_WORKSPACE/appci/scripts/sweep_run_certs.py" \
+            snapshot "$RUNNER_TEMP/certs-before.json"
+
       - name: Build and upload to TestFlight
         # The runner's keychain is empty, so there is nothing revoked or expired
         # to sweep; skipping avoids any chance of a keychain prompt hanging the job.
@@ -121,6 +132,22 @@ jobs:
           SKIP_CERT_CLEANUP: '1'
           APPCI_DIR: ${{ github.workspace }}/appci
         run: ./ios/upload.sh
+
+      - name: Revoke the certificate this run created
+        # -allowProvisioningUpdates mints a fresh Development certificate every
+        # run, and its private key dies with the runner — so each run would
+        # otherwise burn one slot of the team's certificate quota permanently,
+        # until archiving starts failing with "reached the maximum number of
+        # certificates". Runs even when the build failed, since a failed archive
+        # can still have created one. Never fails the job.
+        if: always()
+        env:
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+        run: |
+          export API_KEY_PATH="$HOME/creds/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8"
+          python3 "$GITHUB_WORKSPACE/appci/scripts/sweep_run_certs.py" \
+            sweep "$RUNNER_TEMP/certs-before.json"
 
       - name: Remove credentials from the runner
         # Runners are ephemeral, but do not leave a private key sitting in the
