@@ -48,6 +48,25 @@ Store uploads and promotes are `workflow_dispatch`-only in all three apps — pu
 
 `scripts/preflight.py` guards every upload and promote: it refuses version strings the App Store would treat as downgrades, build numbers either store has already seen, and promotes where pubspec has drifted from the uploaded build (a commit between upload and promote strands the build). `PLAY_SKIP_PREFLIGHT=1` / `--no-submit`-style escape hatches exist per script.
 
+## Signing certificates
+
+`xcodebuild -allowProvisioningUpdates` mints a fresh Development certificate on every iOS run, because a runner starts with an empty keychain and can never reuse the last one. The private key dies with the runner, so without cleanup each run permanently burns one slot of the team's certificate quota until archiving fails with "Your account has reached the maximum number of certificates".
+
+`scripts/sweep_run_certs.py` handles it in two layers:
+
+| Mode | Where | What |
+|---|---|---|
+| `snapshot <file>` / `sweep <file>` | in CI, bracketing the build | revokes certificates that are both absent from the pre-build snapshot **and** have their private key in this runner's keychain |
+| `orphans [--revoke]` | **locally only** | lists (or revokes) certificates with no private key on this machine and older than 3 hours |
+
+Both conditions on `sweep` are load-bearing. auslan and slsl share one Apple team, so two overlapping iOS runs each snapshot the same "before" set and each then mint a certificate — on the snapshot alone, each would revoke the certificate the *other* run is still signing with. The keychain settles ownership: Apple releases the private key once, at creation.
+
+Age is deliberately **not** used in `sweep` — the certificate it must revoke is seconds old, and so is a concurrent run's, so no age window separates them.
+
+`orphans` is the recovery pass for a runner that dies before reaching its sweep (hard timeout, killed runner), which otherwise leaks a certificate silently. It has to run on the developer's machine: App Store Connect exposes nothing that distinguishes a CI-created certificate from a human's — both report displayName "Created via API", and there is no `createdDate` field at all — so the only ground truth is whether the private key is in the keychain in front of you. There, age *is* the right guard: a run archiving right now holds a certificate whose key is on the runner rather than here, so it would otherwise look exactly like an orphan. Age is derived from `expirationDate` minus Apple's one-year validity, and an age that can't be derived counts as too new to touch.
+
+The permanent fix is to stop minting per run — a stored distribution certificate and profile (a `.p12` secret, or fastlane match) with `-allowProvisioningUpdates` dropped. That removes the whole class of failure; the sweep only contains it.
+
 ## Credentials
 
 Key material lives in `~/creds` (see its README); repo-local gitignored files are thin pointers at it:
