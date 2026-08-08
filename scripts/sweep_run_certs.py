@@ -22,9 +22,25 @@ the other run is still signing with. (2) settles ownership: a certificate whose
 key is on this machine is one this run created, since a CI runner starts with
 an empty keychain and Apple hands the key out exactly once, at creation.
 
-  sweep_run_certs.py snapshot <file>   write the current ids to <file>
-  sweep_run_certs.py sweep <file>      revoke ids that appeared since <file>
-                                       AND have a private key here
+Note that age is NOT a usable ownership signal here, tempting as it looks: the
+certificate this run must revoke is seconds old, and a concurrent run's is too,
+so no age window separates them. Age earns its keep only in `orphans` below,
+as a guard rather than as evidence.
+
+The per-run sweep still can't recover from a runner that dies before reaching
+it (a hard timeout, a killed runner), which leaks a certificate silently until
+the team hits the cap. `orphans` is the recovery pass for that, and it has to
+run on the developer's machine: App Store Connect exposes nothing that tells a
+CI-created certificate apart from a human's — both come back with displayName
+"Created via API" — so the only ground truth for "is this still usable by
+anyone" is whether its private key exists in the keychain in front of you.
+
+  sweep_run_certs.py snapshot <file>    write the current ids to <file>
+  sweep_run_certs.py sweep <file>       revoke ids that appeared since <file>
+                                        AND have a private key here
+  sweep_run_certs.py orphans [--revoke] list (or revoke) certificates with no
+                                        private key on THIS machine — run it
+                                        locally, never in CI
 
 Needs APP_STORE_CONNECT_API_KEY_ID, APP_STORE_CONNECT_API_ISSUER_ID and
 API_KEY_PATH, the same trio the other scripts here use.
@@ -38,6 +54,7 @@ like "everything is new" — that case writes nothing and the sweep no-ops.
 import base64
 import hashlib
 import json
+from datetime import datetime, timedelta, timezone
 import os
 import re
 import subprocess
@@ -48,6 +65,16 @@ import urllib.parse
 import urllib.request
 
 API = "https://api.appstoreconnect.apple.com"
+
+# Apple issues signing certificates with a one-year validity; see cert_age.
+CERT_VALIDITY = timedelta(days=365)
+
+# Certificates younger than this are never treated as orphans, however the
+# keychain looks. A CI run that is mid-archive right now holds a brand-new
+# certificate whose key lives on the runner, not here, so it would otherwise
+# look exactly like an orphan — and revoking it would break that build. No run
+# comes close to three hours (the iOS workflow times out at 60 minutes).
+MIN_ORPHAN_AGE = timedelta(hours=3)
 
 
 def log(msg):
@@ -157,6 +184,27 @@ def cert_sha1(attrs):
         return None
 
 
+def cert_age(attrs, now):
+    """How long ago the certificate was issued, or None if that can't be told.
+
+    App Store Connect exposes no createdDate on a certificate, only when it
+    expires — but Apple issues these with a fixed one-year validity, so the
+    issue time is the expiry minus a year. Anything that doesn't parse, or
+    lands in the future, returns None and is treated as "too new to touch".
+    """
+    raw = attrs.get("expirationDate")
+    if not raw:
+        return None
+    try:
+        expires = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    age = now - (expires - CERT_VALIDITY)
+    return age if age >= timedelta(0) else None
+
+
 def keychain_identity_sha1s():
     """Fingerprints of every codesigning IDENTITY in the runner's keychain.
 
@@ -180,11 +228,69 @@ def keychain_identity_sha1s():
     return {h.upper() for h in re.findall(r"\b([0-9A-Fa-f]{40})\b", proc.stdout)}
 
 
+def revoke(client, cert_id):
+    status, data = client.call("DELETE", f"/v1/certificates/{cert_id}")
+    if status in (200, 204):
+        log(f"  revoked {cert_id}")
+    else:
+        log(f"  could not revoke {cert_id}: {status} {data}")
+
+
+def run_orphans(client, current, do_revoke):
+    """Certificates nobody can sign with any more: no private key on this machine.
+
+    Only meaningful where the developer's own keys live, which is why this is a
+    local command. Running it on a CI runner would call every certificate on
+    the team an orphan.
+    """
+    try:
+        local = keychain_identity_sha1s()
+    except RuntimeError as exc:
+        log(f"could not read the keychain, leaving every certificate alone ({exc})")
+        return 0
+    if not local:
+        log("no codesigning identities in this keychain at all — refusing to "
+            "call every certificate an orphan; is this the right machine?")
+        return 0
+
+    now = datetime.now(timezone.utc)
+    orphaned = []
+    for cert_id, attrs in sorted(current.items()):
+        fp = cert_sha1(attrs)
+        if fp and fp in local:
+            log(f"  keep   {cert_id}  private key is here")
+            continue
+        age = cert_age(attrs, now)
+        if age is None or age < MIN_ORPHAN_AGE:
+            log(f"  keep   {cert_id}  too new — a run may be signing with it")
+            continue
+        log(f"  ORPHAN {cert_id}  no private key here, {age.days}d old")
+        orphaned.append(cert_id)
+
+    if not orphaned:
+        log("no orphaned certificates")
+        return 0
+    if not do_revoke:
+        log(f"{len(orphaned)} orphaned certificate(s); re-run with --revoke to remove them")
+        return 0
+    log(f"revoking {len(orphaned)} orphaned certificate(s)")
+    for cert_id in orphaned:
+        revoke(client, cert_id)
+    return 0
+
+
 def main():
-    if len(sys.argv) != 3 or sys.argv[1] not in ("snapshot", "sweep"):
+    argv = sys.argv[1:]
+    if argv[:1] == ["orphans"]:
+        extra = argv[1:]
+        if extra not in ([], ["--revoke"]):
+            print(__doc__, file=sys.stderr)
+            return 2
+    elif len(argv) != 2 or argv[0] not in ("snapshot", "sweep"):
         print(__doc__, file=sys.stderr)
         return 2
-    mode, path = sys.argv[1], sys.argv[2]
+    mode = argv[0]
+    path = argv[1] if mode != "orphans" else None
 
     try:
         client = Client()
@@ -192,6 +298,9 @@ def main():
     except Exception as exc:
         log(f"skipping ({exc})")
         return 0
+
+    if mode == "orphans":
+        return run_orphans(client, current, "--revoke" in argv)
 
     if mode == "snapshot":
         try:
@@ -233,11 +342,7 @@ def main():
 
     log(f"revoking {len(created)} certificate(s) created by this run")
     for cert_id in created:
-        status, data = client.call("DELETE", f"/v1/certificates/{cert_id}")
-        if status in (200, 204):
-            log(f"  revoked {cert_id}")
-        else:
-            log(f"  could not revoke {cert_id}: {status} {data}")
+        revoke(client, cert_id)
     return 0
 
 
