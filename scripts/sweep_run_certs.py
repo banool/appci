@@ -9,11 +9,22 @@ many a team may hold. Left alone they accumulate until archiving fails with
 "Your account has reached the maximum number of certificates".
 
 So: snapshot the certificate ids before the build, and afterwards revoke
-whatever is new. Only ids absent from the snapshot are touched, which keeps
-the developer's own certificates (and any created by a concurrent run) safe.
+whatever is new. Two independent conditions must both hold before anything is
+revoked, because the team is shared and runs overlap:
+
+  1. the id was absent from the pre-build snapshot, and
+  2. the certificate's private key is in THIS runner's keychain.
+
+(1) alone is not enough. Two iOS releases running at once (say auslan and slsl)
+each snapshot the same "before" set and each then mint a certificate, so each
+sees the other's as new — and a sweep on that basis would revoke a certificate
+the other run is still signing with. (2) settles ownership: a certificate whose
+key is on this machine is one this run created, since a CI runner starts with
+an empty keychain and Apple hands the key out exactly once, at creation.
 
   sweep_run_certs.py snapshot <file>   write the current ids to <file>
   sweep_run_certs.py sweep <file>      revoke ids that appeared since <file>
+                                       AND have a private key here
 
 Needs APP_STORE_CONNECT_API_KEY_ID, APP_STORE_CONNECT_API_ISSUER_ID and
 API_KEY_PATH, the same trio the other scripts here use.
@@ -25,8 +36,10 @@ like "everything is new" — that case writes nothing and the sweep no-ops.
 """
 
 import base64
+import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -115,18 +128,56 @@ class Client:
                 parsed = {"errors": [{"detail": raw.decode(errors="replace")}]}
             return exc.code, parsed
 
-    def certificate_ids(self):
-        """Every certificate id on the team, following pagination."""
-        ids = set()
+    def certificates(self):
+        """Every certificate on the team as {id: attributes}, following pagination."""
+        certs = {}
         status, data = self.call("GET", "/v1/certificates", params={"limit": 200})
         while True:
             if status != 200:
                 raise RuntimeError(f"listing certificates failed: {status} {data}")
-            ids.update(c["id"] for c in data.get("data", []))
+            certs.update((c["id"], c.get("attributes") or {}) for c in data.get("data", []))
             nxt = (data.get("links") or {}).get("next")
             if not nxt:
-                return ids
+                return certs
             status, data = self.call("GET", nxt)
+
+
+def cert_sha1(attrs):
+    """SHA-1 of a certificate's DER, or None if the API didn't return its bytes.
+
+    This is the same fingerprint `security find-identity` prints, so it's what
+    lets us match an App Store Connect certificate to a local keychain entry.
+    """
+    content = attrs.get("certificateContent")
+    if not content:
+        return None
+    try:
+        return hashlib.sha1(base64.b64decode(content)).hexdigest().upper()
+    except Exception:
+        return None
+
+
+def keychain_identity_sha1s():
+    """Fingerprints of every codesigning IDENTITY in the runner's keychain.
+
+    An identity is a certificate paired with its private key, so this is
+    exactly the set of certificates this machine could have created — Apple
+    releases the key once, at creation, and a CI runner starts empty.
+    """
+    try:
+        proc = subprocess.run(
+            ["security", "find-identity", "-v", "-p", "codesigning"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"could not run security find-identity: {exc}")
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "security find-identity failed: " + proc.stderr.strip()
+        )
+    return {h.upper() for h in re.findall(r"\b([0-9A-Fa-f]{40})\b", proc.stdout)}
 
 
 def main():
@@ -137,7 +188,7 @@ def main():
 
     try:
         client = Client()
-        current = client.certificate_ids()
+        current = client.certificates()
     except Exception as exc:
         log(f"skipping ({exc})")
         return 0
@@ -158,7 +209,24 @@ def main():
         log(f"no usable snapshot, leaving every certificate alone ({exc})")
         return 0
 
-    created = sorted(current - before)
+    appeared = sorted(set(current) - before)
+    if not appeared:
+        log("no new certificates since the snapshot, nothing to revoke")
+        return 0
+
+    try:
+        local = keychain_identity_sha1s()
+    except RuntimeError as exc:
+        log(f"could not read the keychain, leaving every certificate alone ({exc})")
+        return 0
+
+    created = [c for c in appeared if (cert_sha1(current[c]) or "") in local]
+    others = len(appeared) - len(created)
+    if others:
+        log(
+            f"leaving {others} new certificate(s) alone — no private key here, "
+            "so they belong to a concurrent run"
+        )
     if not created:
         log("this run created no certificates, nothing to revoke")
         return 0
