@@ -31,7 +31,8 @@ on:
         description: Directory holding the Flutter app (e.g. frontend for slsl).
       flutter_version:
         type: string
-        default: '3.44.9'
+        default: ''
+        description: Override appci's canonical Flutter pin. Empty = use it.
       timeout_minutes:
         type: number
         default: 60
@@ -82,11 +83,9 @@ jobs:
           xcodebuild -version
           xcodebuild -showsdks | grep -i iphoneos
 
-      - uses: subosito/flutter-action@v2
+      - uses: banool/appci/.github/actions/setup-flutter@main
         with:
           flutter-version: ${{ inputs.flutter_version }}
-          channel: stable
-          cache: true
 
       - name: Show Flutter version
         run: flutter --version

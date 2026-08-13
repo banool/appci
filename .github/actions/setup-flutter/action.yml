@@ -1,0 +1,45 @@
+# Installs the Flutter SDK at the version pinned in appci's canonical
+# `flutter-version` file, so every repo moves together on one edit.
+#
+# Always reference this by its full path, even from workflows in this repo:
+#
+#   uses: banool/appci/.github/actions/setup-flutter@main
+#
+# A `./`-relative reference would resolve against the *calling* repo's checkout
+# when used from a reusable workflow, which is not what anyone wants here.
+name: Set up Flutter
+description: Install the Flutter SDK at appci's canonical pinned version.
+
+inputs:
+  flutter-version:
+    description: >
+      Override the canonical pin, e.g. to bisect a regression on one app.
+      Leave empty (the default) to use appci's `flutter-version` file.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve Flutter version
+      id: resolve
+      shell: bash
+      env:
+        OVERRIDE: ${{ inputs.flutter-version }}
+      run: |
+        set -euo pipefail
+        if [[ -n "${OVERRIDE//[[:space:]]/}" ]]; then
+          version="${OVERRIDE//[[:space:]]/}"
+          echo "Flutter $version (caller override)"
+        else
+          # $GITHUB_ACTION_PATH is .../appci/.github/actions/setup-flutter
+          version="$(tr -d '[:space:]' < "$GITHUB_ACTION_PATH/../../../flutter-version")"
+          echo "Flutter $version (appci canonical pin)"
+        fi
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+
+    - uses: subosito/flutter-action@v2
+      with:
+        flutter-version: ${{ steps.resolve.outputs.version }}
+        channel: stable
+        cache: true

@@ -41,8 +41,22 @@ One app, one platform, one stage (`internal` = build+upload, `beta`/`external` =
 | `app-release-android.yaml` | test → build appbundle → Play internal via `play_upload.py` | preflight gate before the build; `upload: false` = test-only |
 | `app-release-ios.yaml` | archive on macos-15 → TestFlight internal via the app's `ios/upload.sh` | exists because ASC rejects binaries built on prerelease macOS (ITMS-90111) |
 | `app-promote.yaml` | run the app's `promote.sh` on ubuntu | iOS promotion is pure ASC API — no macOS needed |
-| `app-web-deploy.yaml` | Flutter web → Cloudflare Pages | dictionary apps only |
+| `app-web-deploy.yaml` | Flutter web → Cloudflare Pages | dictionary apps only; `wasm: true` opts into WasmGC |
 | `app-pages-deploy.yaml` | static site → Cloudflare Pages | dictionary apps only |
+
+## The Flutter version
+
+**`flutter-version` at the repo root is the single pin for every repo.** Bumping Flutter is a one-line edit to that file.
+
+It is read by the composite action `.github/actions/setup-flutter`, which every Flutter job uses — including jobs in the app repos that don't go through a reusable workflow (auslan's `release_apk`, dictionarylib's `dart.yml`). Reference it by full path, never `./`:
+
+```yaml
+- uses: banool/appci/.github/actions/setup-flutter@main
+```
+
+A `./`-relative reference inside a reusable workflow resolves against the *calling* repo's checkout, which is not what you want. Every reusable workflow still takes an optional `flutter_version` input that overrides the file when non-empty — for bisecting a regression on one app, not for standing pins. Nothing in any repo should hardcode a version again; if you find one, it is drift.
+
+Because the apps consume appci `@main`, bumping `flutter-version` changes every app's *next* CI run with no commit in the apps and without triggering any app CI. Land it before anything that requires the new SDK — notably before an app raises its pubspec `sdk:` floor, since a floor the installed SDK can't satisfy fails at `pub get`.
 
 Store uploads and promotes are `workflow_dispatch`-only in all three apps — pushes run tests (and the dictionary apps' web/pages deploys and auslan's GitHub-release APK) but never touch the stores. Each app carries thin dispatch callers named **iOS upload (TestFlight internal)**, **Android upload (Play internal)**, and **Promote** — the names the CLI dispatches by. Callers own concurrency: push-triggered callers use `cancel-in-progress: true`, dispatch upload/promote callers use `cancel-in-progress: false` (never cancel a mid-flight store operation).
 

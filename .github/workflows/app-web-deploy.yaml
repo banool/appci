@@ -26,7 +26,15 @@ on:
         description: Directory holding the Flutter app (e.g. frontend for slsl).
       flutter_version:
         type: string
-        default: '3.44.9'
+        default: ''
+        description: Override appci's canonical Flutter pin. Empty = use it.
+      wasm:
+        type: boolean
+        default: false
+        description: >
+          Compile to WasmGC. The build still emits a JS bundle, and the browser
+          picks at runtime, so WebKit (all iOS browsers, Safari) transparently
+          falls back. Opt in per app so either one can be reverted on its own.
     secrets:
       CLOUDFLARE_API_TOKEN:
         required: true
@@ -47,16 +55,17 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || '47989fc190166b22bc15768dc41e8693' }}
     steps:
       - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
+      - uses: banool/appci/.github/actions/setup-flutter@main
         with:
           flutter-version: ${{ inputs.flutter_version }}
-          channel: stable
-          cache: true
       # No pubspec_overrides.yaml in CI (it's gitignored), so this resolves
       # dictionarylib from the git ref pinned in pubspec.yaml — keep that pin
       # current with any dictionarylib changes the web build needs.
       - run: flutter pub get
-      - run: flutter build web --release
+      # --source-maps because a WasmGC stack trace is unreadable without it,
+      # and web errors land in the self-hosted Aptabase. The .map files sit on
+      # Pages unfetched by normal page loads.
+      - run: flutter build web --release ${{ inputs.wasm && '--wasm --source-maps' || '' }}
       - name: Ensure Pages project exists
         run: npx wrangler@latest pages project create ${{ inputs.project_name }} --production-branch=${{ inputs.production_branch }} || true
       - name: Deploy to Cloudflare Pages

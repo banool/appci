@@ -11,7 +11,8 @@ on:
         description: Directory holding the Flutter app (e.g. frontend for slsl).
       flutter_version:
         type: string
-        default: '3.44.9'
+        default: ''
+        description: Override appci's canonical Flutter pin. Empty = use it.
       format_paths:
         type: string
         default: 'lib test integration_test test_driver'
@@ -24,11 +25,9 @@ jobs:
         working-directory: ${{ inputs.working_directory }}
     steps:
       - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
+      - uses: banool/appci/.github/actions/setup-flutter@main
         with:
           flutter-version: ${{ inputs.flutter_version }}
-          channel: stable
-          cache: true
       # `dart format` derives its style from the package's language version
       # (the pubspec sdk lower bound), so resolve the package first — without
       # pub get it falls back to the latest style and reformats everything.
