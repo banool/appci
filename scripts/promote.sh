@@ -218,9 +218,17 @@ FAILED=""
 if [[ "$IOS" == 1 ]]; then
   echo
   if [[ "$STAGE" == external ]]; then
-    echo "==> iOS: promoting the latest TestFlight build to the App Store..."
+    echo "==> iOS: promoting build $BUILD_NUMBER to the App Store..."
+    # Select by build number, not "latest". ASC takes 5-20 min to process an
+    # upload, and during that window the new build is not yet visible in
+    # /v1/builds — so "latest" silently resolves to the PREVIOUS build, which
+    # is already VALID and returns instantly. Naming the build makes
+    # select_build poll for that specific one and fail loudly if it was never
+    # uploaded, instead of quietly shipping the wrong binary. The beta path
+    # below has always done this; only external was guessing.
     if ASC_BUNDLE_ID="$PROMOTE_BUNDLE_ID" \
-       ASC_SELECT="latest" \
+       ASC_SELECT="number" \
+       ASC_BUILD_NUMBER="$BUILD_NUMBER" \
        ASC_VERSION_STRING="$VERSION_STRING" \
        ASC_WHATS_NEW="$NOTES" \
        ASC_RELEASE_TYPE="AFTER_APPROVAL" \
