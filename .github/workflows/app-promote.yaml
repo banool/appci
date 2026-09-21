@@ -37,6 +37,10 @@ on:
         type: boolean
         default: false
         description: Plan only; touch nothing on either store.
+      replace_pending:
+        type: boolean
+        default: false
+        description: iOS external only. Pull the version currently waiting for App Store review and submit this build in its place.
       working_directory:
         type: string
         default: '.'
@@ -113,12 +117,14 @@ jobs:
           NOTES: ${{ inputs.notes }}
           ROLLOUT: ${{ inputs.rollout }}
           DRY_RUN: ${{ inputs.dry_run }}
+          REPLACE_PENDING: ${{ inputs.replace_pending }}
           APPCI_DIR: ${{ github.workspace }}/appci
           PLAY_SERVICE_ACCOUNT_JSON_PATH: ${{ runner.temp }}/play_key.json
         run: |
           set -euo pipefail
           args=(--stage "$STAGE" --yes)
           [[ "$DRY_RUN" == "true" ]] && args+=(--dry-run)
+          [[ "$REPLACE_PENDING" == "true" ]] && args+=(--replace-pending)
           [[ "$PLATFORM" == "ios" ]] && args+=(--ios-only)
           [[ "$PLATFORM" == "android" ]] && args+=(--android-only)
           [[ -n "$ROLLOUT" ]] && args+=(--rollout="$ROLLOUT")

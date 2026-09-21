@@ -35,6 +35,9 @@
 #   ./promote.sh --stage external --no-submit     # iOS: prepare but don't submit
 #   ./promote.sh --stage external --no-commit     # Android: prepare but don't commit
 #   ./promote.sh --stage external --rollout=0.2   # Android: staged rollout
+#   ./promote.sh --stage external --replace-pending  # iOS: pull the version that
+#                                                 # is waiting for review and
+#                                                 # submit this build instead
 #
 # A [notes-file] positional supplies the notes for both stores. For --stage
 # external, omitting it uses a generic default. For --stage beta, external
@@ -76,6 +79,7 @@ SUBMIT=1
 COMMIT=1
 ROLLOUT=""
 NOTES_FILE=""
+REPLACE_PENDING=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --stage) STAGE="${2:-}"; shift 2 ;;
@@ -87,6 +91,7 @@ while [[ $# -gt 0 ]]; do
     --no-submit) SUBMIT=0; shift ;;
     --no-commit) COMMIT=0; shift ;;
     --rollout=*) ROLLOUT="${1#--rollout=}"; shift ;;
+    --replace-pending) REPLACE_PENDING=1; shift ;;
     -*) echo "Unknown flag: $1" >&2; exit 1 ;;
     *) NOTES_FILE="$1"; shift ;;
   esac
@@ -192,7 +197,7 @@ echo "  Stage:   $STAGE"
 echo "  Version: $VERSION_STRING  (build $BUILD_NUMBER)"
 echo "  Build:   latest already uploaded (internal track)"
 if [[ "$STAGE" == external ]]; then
-  [[ "$IOS" == 1 ]] && echo "  iOS:     App Store, releaseType AFTER_APPROVAL, submit=$([[ $SUBMIT == 1 ]] && echo yes || echo no)"
+  [[ "$IOS" == 1 ]] && echo "  iOS:     App Store, releaseType AFTER_APPROVAL, submit=$([[ $SUBMIT == 1 ]] && echo yes || echo no)$([[ $REPLACE_PENDING == 1 ]] && echo ', replacing the version waiting for review')"
   [[ "$ANDROID" == 1 ]] && echo "  Android: Play production, rollout $ROLLOUT_DESC, commit=$([[ $COMMIT == 1 ]] && echo yes || echo no)"
 else
   [[ "$IOS" == 1 ]] && echo "  iOS:     TestFlight group '$PROMOTE_BETA_GROUP', submit for Beta App Review=$([[ $SUBMIT == 1 ]] && echo yes || echo no)"
@@ -234,6 +239,7 @@ if [[ "$IOS" == 1 ]]; then
        ASC_RELEASE_TYPE="AFTER_APPROVAL" \
        ASC_SUBMIT="$SUBMIT" \
        ASC_DRY_RUN="$DRY_RUN" \
+       ASC_REPLACE_PENDING="$REPLACE_PENDING" \
        APP_STORE_CONNECT_API_KEY_ID="$KEY_ID" \
        APP_STORE_CONNECT_API_ISSUER_ID="$APP_STORE_CONNECT_API_ISSUER_ID" \
        API_KEY_PATH="$API_KEY_PATH" \

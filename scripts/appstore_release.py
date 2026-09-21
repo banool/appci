@@ -22,6 +22,9 @@ Config comes from the environment (promote.sh sets these):
   ASC_RELEASE_TYPE       AFTER_APPROVAL (default) | MANUAL | SCHEDULED
   ASC_SUBMIT             "1" (default) submit for review | "0" prepare only
   ASC_DRY_RUN            "1" plan only, no writes | "0" (default)
+  ASC_REPLACE_PENDING    "1" pull a version that is WAITING_FOR_REVIEW back out
+                         of the queue so this build takes its place | "0"
+                         (default) leave queued versions alone
 """
 
 import base64
@@ -292,13 +295,102 @@ def select_build(client, app_id, select, build_number):
     die("timed out waiting for the build to finish processing")
 
 
-def find_or_create_version(client, app_id, version_string, dry_run):
+def list_versions(client, app_id):
     st, data, versions = client.get_all(
         f"/v1/apps/{app_id}/appStoreVersions",
         params={"filter[platform]": "IOS", "limit": "50"},
     )
     if st != 200:
         die(f"could not list App Store versions: {err_detail(data)}")
+    return versions
+
+
+def replace_pending_versions(client, app_id, versions, dry_run):
+    """Pull every version that is queued for review (WAITING_FOR_REVIEW) back
+    out of the queue, so the build being promoted can take over its slot.
+
+    Cancelling the review submission is what "Remove from Review" does in App
+    Store Connect: the version drops back to PREPARE_FOR_SUBMISSION with its
+    metadata intact, which makes it reusable (same version string) or renamable
+    (new one) by find_or_create_version. Only WAITING_FOR_REVIEW is touched — a
+    version that Apple has actually picked up (IN_REVIEW) stays with them, and
+    pulling that is a human decision.
+
+    Returns the (possibly refreshed) version list."""
+    pending = [v for v in versions if version_state(v) == "WAITING_FOR_REVIEW"]
+    if not pending:
+        return versions
+    for v in pending:
+        log(
+            f"App Store version {v['attributes'].get('versionString')} is "
+            "WAITING_FOR_REVIEW; pulling it from the queue so this build replaces it"
+        )
+    st, data, subs = client.get_all(
+        "/v1/reviewSubmissions",
+        params={
+            "filter[app]": app_id,
+            "filter[platform]": "IOS",
+            "filter[state]": "WAITING_FOR_REVIEW,READY_FOR_REVIEW",
+            "limit": "10",
+        },
+    )
+    if st != 200:
+        die(f"could not list review submissions: {err_detail(data)}")
+    if not subs:
+        die(
+            "the version is WAITING_FOR_REVIEW but no queued review submission was "
+            "found to cancel; remove it from review in App Store Connect and retry"
+        )
+    for sub in subs:
+        state = (sub.get("attributes") or {}).get("state")
+        if dry_run:
+            log(f"  [dry-run] would cancel review submission {sub['id']} ({state})")
+            continue
+        log(f"  cancelling review submission {sub['id']} ({state})")
+        stc, dc = client.call(
+            "PATCH",
+            f"/v1/reviewSubmissions/{sub['id']}",
+            body={
+                "data": {
+                    "type": "reviewSubmissions",
+                    "id": sub["id"],
+                    "attributes": {"canceled": True},
+                }
+            },
+        )
+        if stc not in (200, 201):
+            die(f"could not cancel review submission {sub['id']}: {err_detail(dc)}")
+    if dry_run:
+        # Plan as if the cancel had landed: the pending versions are now ours.
+        for v in pending:
+            v["attributes"]["appVersionState"] = "PREPARE_FOR_SUBMISSION"
+            v["attributes"].pop("appStoreState", None)
+        return versions
+    # The state flips asynchronously; wait for every pulled version to land in
+    # a state we can edit before carrying on.
+    deadline = time.time() + 5 * 60
+    ids = {v["id"] for v in pending}
+    while True:
+        versions = list_versions(client, app_id)
+        still = [
+            v for v in versions if v["id"] in ids and version_state(v) not in RENAMABLE_STATES
+        ]
+        if not still:
+            log("  pulled from the queue; the version is editable again")
+            return versions
+        if time.time() > deadline:
+            die(
+                "cancelled the review submission but the version is still "
+                + ", ".join(f"{version_state(v)}" for v in still)
+                + " after 5 minutes; check App Store Connect and retry"
+            )
+        time.sleep(POLL_INTERVAL_S)
+
+
+def find_or_create_version(client, app_id, version_string, dry_run, replace_pending=False):
+    versions = list_versions(client, app_id)
+    if replace_pending:
+        versions = replace_pending_versions(client, app_id, versions, dry_run)
     match = next(
         (v for v in versions if v["attributes"].get("versionString") == version_string),
         None,
@@ -594,6 +686,7 @@ def main():
     release_type = os.environ.get("ASC_RELEASE_TYPE", "AFTER_APPROVAL").strip()
     submit = os.environ.get("ASC_SUBMIT", "1").strip() != "0"
     dry_run = os.environ.get("ASC_DRY_RUN", "0").strip() == "1"
+    replace_pending = os.environ.get("ASC_REPLACE_PENDING", "0").strip() == "1"
 
     if select == "number" and not build_number:
         die("ASC_SELECT=number requires ASC_BUILD_NUMBER")
@@ -629,7 +722,7 @@ def main():
 
     # 3. Version.
     version_id, already_done = find_or_create_version(
-        client, app_id, version_string, dry_run
+        client, app_id, version_string, dry_run, replace_pending
     )
     if already_done:
         log("Done — this version is already submitted/released.")
