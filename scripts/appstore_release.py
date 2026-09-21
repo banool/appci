@@ -325,12 +325,16 @@ def replace_pending_versions(client, app_id, versions, dry_run):
             f"App Store version {v['attributes'].get('versionString')} is "
             "WAITING_FOR_REVIEW; pulling it from the queue so this build replaces it"
         )
+    # Only WAITING_FOR_REVIEW submissions can be cancelled. An app often also
+    # carries empty READY_FOR_REVIEW submissions left behind by earlier runs
+    # (created, never submitted); Apple answers "Resource is not in
+    # cancellable state" for those, and submit_for_review reuses them anyway.
     st, data, subs = client.get_all(
         "/v1/reviewSubmissions",
         params={
             "filter[app]": app_id,
             "filter[platform]": "IOS",
-            "filter[state]": "WAITING_FOR_REVIEW,READY_FOR_REVIEW",
+            "filter[state]": "WAITING_FOR_REVIEW",
             "limit": "10",
         },
     )
