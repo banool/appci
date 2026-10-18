@@ -66,19 +66,24 @@ ANDROID_IMAGE_TYPES = None   # capture WxH -> [Play image slots]
 APP_STORE_SHOTS = None       # ordered curation list for the App Store
 PLAY_SHOTS = None            # ordered curation list for Google Play
 DEFAULT_API_KEY_PATH = None  # optional fallback when secrets.env lacks API_KEY_PATH
+PRUNE_UNMANAGED_IOS_SETS = False  # delete ASC sets outside IOS_DISPLAY_TYPES
 
 
 def configure(*, project_root, ios_bundle_id, android_package_name,
               play_locale_map, ios_locale_map, android_image_types,
               app_store_shots, play_shots,
-              default_api_key_path=None, play_key_default=None):
+              default_api_key_path=None, play_key_default=None,
+              prune_unmanaged_ios_sets=False):
     """Set the app-specific values. Must be called before main().
 
     play_locale_map / ios_locale_map: the capture directories are named after
     the app locale used at capture time, but the store listings may use a
     different language code (e.g. auslan captures en-AU but its Play listing
     has only ever had en-US) — these map the capture locale onto each store's.
-    Unmapped locales pass through unchanged.
+    A value may also be a list, to send one capture set to several store
+    locales (e.g. "en" -> en-AU, en-GB and en-US, since each App Store
+    storefront only indexes the locales it lists). Unmapped locales pass
+    through unchanged.
 
     android_image_types: Google Play has one image slot per device class. The
     WxH token take_screenshots.py embeds in each filename identifies the
@@ -95,11 +100,19 @@ def configure(*, project_root, ios_bundle_id, android_package_name,
     play_key_default: optional default path for the Play service-account JSON
     (the PLAY_SERVICE_ACCOUNT_JSON_PATH env var always wins); when unset the
     default is <app>/android/play_service_account.json.
+
+    prune_unmanaged_ios_sets: also delete, in every App Store localization
+    uploaded to, the screenshot sets for display types this tool doesn't
+    capture (the 5.5"/4.7" iPhone and older iPad slots left over from the
+    fastlane days). Those sets keep showing their stale captures on older
+    devices; with them gone the App Store scales the 6.9"/13" sets down
+    instead.
     """
     global PROJECT_ROOT, SCREENSHOTS_DIR, IOS_PUBLISH_ENV, PLAY_KEY_PATH
     global IOS_BUNDLE_ID, ANDROID_PACKAGE_NAME
     global PLAY_LOCALE_MAP, IOS_LOCALE_MAP, ANDROID_IMAGE_TYPES
     global APP_STORE_SHOTS, PLAY_SHOTS, DEFAULT_API_KEY_PATH
+    global PRUNE_UNMANAGED_IOS_SETS
     PROJECT_ROOT = Path(project_root)
     SCREENSHOTS_DIR = PROJECT_ROOT / "screenshots"
     IOS_PUBLISH_ENV = PROJECT_ROOT / "ios" / "secrets.env"
@@ -120,6 +133,13 @@ def configure(*, project_root, ios_bundle_id, android_package_name,
     APP_STORE_SHOTS = list(app_store_shots)
     PLAY_SHOTS = list(play_shots)
     DEFAULT_API_KEY_PATH = default_api_key_path
+    PRUNE_UNMANAGED_IOS_SETS = bool(prune_unmanaged_ios_sets)
+
+
+def store_locales(locale_map, locale):
+    """The store locales a capture locale maps onto (see configure())."""
+    target = locale_map.get(locale, locale)
+    return [target] if isinstance(target, str) else list(target)
 
 
 # --- Capture -> store slot mapping. ---
@@ -372,15 +392,18 @@ def discover(platform):
 
 def describe_plan(platform, plan):
     slot_map = IOS_DISPLAY_TYPES if platform == "ios" else ANDROID_IMAGE_TYPES
+    locale_map = IOS_LOCALE_MAP if platform == "ios" else PLAY_LOCALE_MAP
     for locale, groups in plan.items():
+        targets = ", ".join(store_locales(locale_map, locale))
         for res, files in groups:
             slots = slot_map[res]
             slots = [slots] if isinstance(slots, str) else slots
             for slot in slots:
                 LOG.info(
-                    "%s %s: %s <- %d shots (%s)",
+                    "%s %s -> %s: %s <- %d shots (%s)",
                     platform,
                     locale,
+                    targets,
                     slot,
                     len(files),
                     ", ".join(FILENAME_RE.match(f.name)["slug"] for f in files),
@@ -613,8 +636,12 @@ def upload_ios(plan):
     locs_by_locale = {l["attributes"]["locale"]: l for l in locs}
 
     touched_sets = {}
-    for locale, groups in plan.items():
-        asc_locale = IOS_LOCALE_MAP.get(locale, locale)
+    targets = [
+        (asc_locale, groups)
+        for locale, groups in plan.items()
+        for asc_locale in store_locales(IOS_LOCALE_MAP, locale)
+    ]
+    for asc_locale, groups in targets:
         loc = locs_by_locale.get(asc_locale)
         if loc is None:
             raise RuntimeError(
@@ -676,6 +703,17 @@ def upload_ios(plan):
                 },
             )
             touched_sets[sset["id"]] = label
+        if PRUNE_UNMANAGED_IOS_SETS:
+            managed = set(IOS_DISPLAY_TYPES.values())
+            for display_type, sset in sorted(sets_by_type.items()):
+                if display_type in managed:
+                    continue
+                LOG.info(
+                    "Deleting unmanaged screenshot set %s/%s",
+                    asc_locale,
+                    display_type,
+                )
+                client.request("DELETE", f"/v1/appScreenshotSets/{sset['id']}")
     verify_ios_processing(client, touched_sets)
     LOG.info("App Store: done.")
 
@@ -746,8 +784,12 @@ def upload_android(plan):
     LOG.info("Opened Play edit %s", edit_id)
     listings = api("GET", f"/edits/{edit_id}/listings").get("listings") or []
     languages = {l["language"] for l in listings}
-    for locale, groups in plan.items():
-        language = PLAY_LOCALE_MAP.get(locale, locale)
+    targets = [
+        (language, groups)
+        for locale, groups in plan.items()
+        for language in store_locales(PLAY_LOCALE_MAP, locale)
+    ]
+    for language, groups in targets:
         if language not in languages:
             raise RuntimeError(
                 f"the Play listing has no {language} language (has: "
