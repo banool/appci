@@ -58,6 +58,17 @@ PLAY_SCOPE = "https://www.googleapis.com/auth/androidpublisher"
 FAILURES = []
 NOTES = []
 
+# App Store version states that are still entirely ours: not handed to Apple,
+# so a build can still be uploaded for that version string. Matches
+# RENAMABLE_STATES in appstore_release.py.
+OPEN_VERSION_STATES = {
+    "PREPARE_FOR_SUBMISSION",
+    "DEVELOPER_REJECTED",
+    "REJECTED",
+    "METADATA_REJECTED",
+    "INVALID_BINARY",
+}
+
 
 def die(msg):
     print(f"\n[preflight] ERROR: {msg}", file=sys.stderr)
@@ -222,6 +233,15 @@ def check_ios(version, build):
             # a retry it is already there. Only a version that has moved beyond
             # our control would matter, and appstore_release.py checks that.
             log(f"iOS: version {version} already exists ({state}) — expected when promoting")
+        elif c == 0 and state in OPEN_VERSION_STATES:
+            # Created ahead of the build, e.g. to stage store metadata and
+            # screenshots on it. Its build train is still open to uploads, and
+            # appstore_release.py reuses an editable version rather than
+            # creating one, so the promote will attach this build to it.
+            log(
+                f"iOS: version {version} already exists ({state}) and is not "
+                "yet submitted — the promote will reuse it"
+            )
         elif c == 0:
             fail(
                 f"iOS: version {version} already exists on App Store Connect "
