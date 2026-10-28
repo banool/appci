@@ -9,7 +9,7 @@
 #   Phase D (device B): editor likewise recovers without the consumed
 #                       invite and sees the rename; full convergence.
 #
-# Then three runs that need the worker but only one device and one person
+# Then four runs that need the worker but only one device and one person
 # each, so they ride along here rather than in the single-device suites:
 #
 #   Solo revise  (device A): someone shares their default list under another
@@ -21,6 +21,8 @@
 #   Solo imports (device A): a list its owner shared as "search for" (a name
 #                       a list on the device can't have) arrives from their
 #                       other device, and search still works.
+#   Solo follow  (device B): following a list from its share link lands on
+#                       the Subscribed tab with the list marked new, once.
 #
 # This is the canonical script; each app's integration_test/multi_device/run.sh
 # is a thin wrapper that sets the per-app env below and execs this.
@@ -172,4 +174,6 @@ run_phase solo-upgrade "$DEVICE_B" upgrade_shared_favourites_test.dart
 
 run_phase solo-imports "$DEVICE_A" solo_owner_imports_test.dart
 
-echo "== multi-device e2e: ALL FOUR PHASES AND THE THREE SOLO RUNS PASSED =="
+run_phase solo-follow "$DEVICE_B" solo_follow_link_test.dart
+
+echo "== multi-device e2e: ALL FOUR PHASES AND THE FOUR SOLO RUNS PASSED =="
