@@ -38,9 +38,17 @@
 #   Phase G  (device A): a list deleted elsewhere goes; one with unsent
 #                       changes here stays as a list of its own; a list
 #                       deleted here goes from the account.
+#   Phase H1 (device A): answers from earlier sessions and a session now
+#                       go up.
+#   Phase H2 (device B): A's answers count in its due cards and progress
+#                       page; its own session goes up.
+#   Phase H3 (device A): a new install has every answer from both.
 #   Solo old stop sharing (device B): a list shared from a build before
 #                       account sync and "unshared" by it stays on the
 #                       account, private.
+#   Solo upgrade sync (device A): an install from before account sync takes
+#                       the update and signs in; its lists, history and
+#                       progress come through, once.
 #
 # This is the canonical script; each app's integration_test/multi_device/run.sh
 # is a thin wrapper that sets the per-app env below and execs this.
@@ -205,7 +213,11 @@ run_phase phase-e2 "$DEVICE_B" phase_e2_second_device_test.dart
 run_phase phase-e3 "$DEVICE_A" phase_e3_first_device_again_test.dart
 run_phase phase-f "$DEVICE_B" phase_f_offline_edits_test.dart
 run_phase phase-g "$DEVICE_A" phase_g_delete_elsewhere_test.dart
+run_phase phase-h1 "$DEVICE_A" phase_h1_first_device_test.dart
+run_phase phase-h2 "$DEVICE_B" phase_h2_second_device_test.dart
+run_phase phase-h3 "$DEVICE_A" phase_h3_first_device_again_test.dart
 run_phase solo-old-stop-sharing "$DEVICE_B" solo_old_build_stop_sharing_test.dart
+run_phase solo-upgrade-sync "$DEVICE_A" upgrade_sync_from_old_install_test.dart
 
 if [[ -n "${MD_SKIP:-}" ]]; then
   echo "== multi-device e2e: every run not skipped passed (skipped: $MD_SKIP) =="
