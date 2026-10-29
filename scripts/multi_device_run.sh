@@ -49,6 +49,11 @@
 #   Solo upgrade sync (device A): an install from before account sync takes
 #                       the update and signs in; its lists, history and
 #                       progress come through, once.
+#   Solo offline/online (device A, then B): with a proxy inside the app
+#                       taken down, a list made, filled, renamed, revised
+#                       and a setting changed through the UI all show at
+#                       once with nothing said; back online it all goes up,
+#                       and device B, a fresh install, has it.
 #
 # This is the canonical script; each app's integration_test/multi_device/run.sh
 # is a thin wrapper that sets the per-app env below and execs this.
@@ -218,6 +223,8 @@ run_phase phase-h2 "$DEVICE_B" phase_h2_second_device_test.dart
 run_phase phase-h3 "$DEVICE_A" phase_h3_first_device_again_test.dart
 run_phase solo-old-stop-sharing "$DEVICE_B" solo_old_build_stop_sharing_test.dart
 run_phase solo-upgrade-sync "$DEVICE_A" upgrade_sync_from_old_install_test.dart
+run_phase solo-offline-online "$DEVICE_A" solo_offline_online_test.dart
+run_phase solo-offline-online-after "$DEVICE_B" solo_offline_online_after_test.dart
 
 if [[ -n "${MD_SKIP:-}" ]]; then
   echo "== multi-device e2e: every run not skipped passed (skipped: $MD_SKIP) =="
