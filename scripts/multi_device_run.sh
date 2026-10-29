@@ -34,15 +34,19 @@
 #                       Animals on the account holding both.
 #   Phase E3 (device A): a new install with yet another Animals: the one
 #                       list, with every sign.
-#   Phase F  (device B): both edit the same list offline: the union, once.
+#   Phase F  (device B): both edit the same list offline: the union, once;
+#                       a sign removed on one and saved again on the other
+#                       stays.
 #   Phase G  (device A): a list deleted elsewhere goes; one with unsent
 #                       changes here stays as a list of its own; a list
 #                       deleted here goes from the account.
 #   Phase H1 (device A): answers from earlier sessions and a session now
-#                       go up.
+#                       go up; a random-mode session is counted.
 #   Phase H2 (device B): A's answers count in its due cards and progress
-#                       page; its own session goes up.
-#   Phase H3 (device A): a new install has every answer from both.
+#                       page; its own session goes up; its random-mode
+#                       session adds to A's on the progress page.
+#   Phase H3 (device A): a new install has every answer from both, and the
+#                       random-mode total of both.
 #   Solo old stop sharing (device B): a list shared from a build before
 #                       account sync and "unshared" by it stays on the
 #                       account, private.
@@ -50,10 +54,24 @@
 #                       the update and signs in; its lists, history and
 #                       progress come through, once.
 #   Solo offline/online (device A, then B): with a proxy inside the app
-#                       taken down, a list made, filled, renamed, revised
-#                       and a setting changed through the UI all show at
-#                       once with nothing said; back online it all goes up,
-#                       and device B, a fresh install, has it.
+#                       taken down, then turned into a black hole, a list
+#                       made, filled, renamed, revised and a setting changed
+#                       through the UI all show at once with nothing said;
+#                       back online it all goes up (the sync status sheet
+#                       says so), and device B, a fresh install, has it.
+#   Follow 1 to 3 (A, B, A): A follows a shared list from its link; B has
+#                       it in Subscribed and unfollows; A (its install kept)
+#                       loses it.
+#   Solo account switch (device A): signed in as A, then B, then A again
+#                       on one device: A's lists plus the one made under B,
+#                       nothing doubled.
+#   Deletion 1 to 3 (B, A, B): B signed in with a list and answers; A
+#                       deletes the account; B (its install kept) is signed
+#                       out by its next sync, keeps everything, and signing
+#                       in again makes a new account from it.
+#   Solo heavy account (device B): 20 lists of 50 signs and 2,000 answers;
+#                       taps answered during the merge, Revision quick after
+#                       (timings in the log as MD_OUT HEAVY_*).
 #
 # This is the canonical script; each app's integration_test/multi_device/run.sh
 # is a thin wrapper that sets the per-app env below and execs this.
@@ -225,6 +243,30 @@ run_phase solo-old-stop-sharing "$DEVICE_B" solo_old_build_stop_sharing_test.dar
 run_phase solo-upgrade-sync "$DEVICE_A" upgrade_sync_from_old_install_test.dart
 run_phase solo-offline-online "$DEVICE_A" solo_offline_online_test.dart
 run_phase solo-offline-online-after "$DEVICE_B" solo_offline_online_after_test.dart
+
+# Follows across devices. Follow 1 leaves its install (--no-uninstall) for
+# follow 3, so nothing else runs on device A in between.
+run_phase follow-1 "$DEVICE_A" follow_first_device_test.dart --no-uninstall
+FOLLOW_LIST_ID=$(scrape follow-1 MD_FOLLOW_LIST_ID)
+[[ -n "$FOLLOW_LIST_ID" || ",${MD_SKIP:-}," == *",follow-1,"* ]] || {
+  echo "FAIL: follow 1 emitted no list id" >&2
+  exit 1
+}
+run_phase follow-2 "$DEVICE_B" follow_second_device_test.dart \
+  --dart-define=MD_FOLLOW_LIST_ID="$FOLLOW_LIST_ID"
+run_phase follow-3 "$DEVICE_A" follow_first_device_again_test.dart \
+  --dart-define=MD_FOLLOW_LIST_ID="$FOLLOW_LIST_ID"
+
+run_phase solo-account-switch "$DEVICE_A" solo_account_switch_test.dart
+
+# Account deletion seen from the other device. Deletion 1 leaves its
+# install (--no-uninstall) for deletion 3, so nothing else runs on device B
+# in between.
+run_phase deletion-1 "$DEVICE_B" deletion_other_device_before_test.dart --no-uninstall
+run_phase deletion-2 "$DEVICE_A" deletion_deleting_device_test.dart
+run_phase deletion-3 "$DEVICE_B" deletion_other_device_after_test.dart
+
+run_phase solo-heavy-account "$DEVICE_B" solo_heavy_account_test.dart
 
 if [[ -n "${MD_SKIP:-}" ]]; then
   echo "== multi-device e2e: every run not skipped passed (skipped: $MD_SKIP) =="
