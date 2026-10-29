@@ -24,6 +24,24 @@
 #   Solo follow  (device B): following a list from its share link lands on
 #                       the Subscribed tab with the list marked new, once.
 #
+# Then account sync (everything a signed-in person has, on every device).
+# Each run starts from a fresh install, so what a phase needs from "another
+# device" mid-run is done over HTTP by the suite; phase E carries its state
+# between the two real apps through the account itself:
+#
+#   Phase E1 (device A): a list called Animals, then sign in.
+#   Phase E2 (device B): its own Animals with other signs, sign in: one
+#                       Animals on the account holding both.
+#   Phase E3 (device A): a new install with yet another Animals: the one
+#                       list, with every sign.
+#   Phase F  (device B): both edit the same list offline: the union, once.
+#   Phase G  (device A): a list deleted elsewhere goes; one with unsent
+#                       changes here stays as a list of its own; a list
+#                       deleted here goes from the account.
+#   Solo old stop sharing (device B): a list shared from a build before
+#                       account sync and "unshared" by it stays on the
+#                       account, private.
+#
 # This is the canonical script; each app's integration_test/multi_device/run.sh
 # is a thin wrapper that sets the per-app env below and execs this.
 #
@@ -46,6 +64,7 @@
 #   run.sh                       # picks the first two booted devices
 #   run.sh <deviceA> <deviceB>   # explicit flutter device ids
 #   run.sh --fresh ...           # uninstall the app from both first
+#   MD_SKIP=solo-follow run.sh   # leave out runs by name (comma-separated)
 #
 # Android emulators are handled automatically: they reach the host's
 # worker via 10.0.2.2 instead of localhost.
@@ -137,6 +156,10 @@ curl -fsS -m 10 -X POST "$API_BASE/v1/test/wipe" \
 run_phase() {
   local name=$1 device=$2 file=$3; shift 3
   local log="$LOG_DIR/$name.log"
+  if [[ ",${MD_SKIP:-}," == *",$name,"* ]]; then
+    echo "-- $name skipped (MD_SKIP)"
+    return 0
+  fi
   echo "-- $name on $device"
   if ! "$FLUTTER" test "integration_test/multi_device/$file" -d "$device" \
       --dart-define=MD_RUN_ID="$RUN_ID" \
@@ -176,4 +199,16 @@ run_phase solo-imports "$DEVICE_A" solo_owner_imports_test.dart
 
 run_phase solo-follow "$DEVICE_B" solo_follow_link_test.dart
 
-echo "== multi-device e2e: ALL FOUR PHASES AND THE FOUR SOLO RUNS PASSED =="
+# --- Account sync ---------------------------------------------------------------
+run_phase phase-e1 "$DEVICE_A" phase_e1_first_device_test.dart
+run_phase phase-e2 "$DEVICE_B" phase_e2_second_device_test.dart
+run_phase phase-e3 "$DEVICE_A" phase_e3_first_device_again_test.dart
+run_phase phase-f "$DEVICE_B" phase_f_offline_edits_test.dart
+run_phase phase-g "$DEVICE_A" phase_g_delete_elsewhere_test.dart
+run_phase solo-old-stop-sharing "$DEVICE_B" solo_old_build_stop_sharing_test.dart
+
+if [[ -n "${MD_SKIP:-}" ]]; then
+  echo "== multi-device e2e: every run not skipped passed (skipped: $MD_SKIP) =="
+else
+  echo "== multi-device e2e: ALL PHASES AND SOLO RUNS PASSED =="
+fi
