@@ -126,10 +126,16 @@ def api(token, method, path, body=None, params=None):
 
 def err_detail(data):
     errors = data.get("errors", []) if isinstance(data, dict) else []
-    joined = "; ".join(
-        f"{e.get('title', '')}: {e.get('detail', '')}".strip(": ") for e in errors
-    )
-    return joined or json.dumps(data)[:500]
+    parts = []
+    for e in errors:
+        parts.append(f"{e.get('title', '')}: {e.get('detail', '')}".strip(": "))
+        # A 409 that says "check associated errors" carries the actual reason
+        # here, e.g. an age rating question nobody has answered yet.
+        assoc = (e.get("meta") or {}).get("associatedErrors") or {}
+        for path, items in assoc.items():
+            for item in items:
+                parts.append(f"  {path}: {item.get('detail') or item.get('title', '')}")
+    return "; ".join(parts) or json.dumps(data)[:500]
 
 
 def main():
