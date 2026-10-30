@@ -25,6 +25,10 @@ Config comes from the environment (promote.sh sets these):
   ASC_REPLACE_PENDING    "1" pull a version that is WAITING_FOR_REVIEW back out
                          of the queue so this build takes its place | "0"
                          (default) leave queued versions alone
+  ASC_SOCIAL_MEDIA       "false" (default) | "true": the answer to the age
+                         rating questionnaire's "social media" question, filled
+                         in when the app has never answered it (see
+                         ensure_age_rating)
 """
 
 import base64
@@ -569,6 +573,70 @@ def set_release_type(client, version_id, release_type, dry_run):
         die(f"could not set release type: {err_detail(data)}")
 
 
+def ensure_age_rating(client, app_id, dry_run):
+    """Answer the age rating questionnaire's "social media" question if the app
+    never has. Apple added it (September 2026) and refuses to add a version to
+    review until it is answered, and the refusal only says the version "is not
+    in valid state". The declaration hangs off the app info, not the version,
+    so it survives from release to release once set; this is only ever a
+    one-off per app. The answer comes from ASC_SOCIAL_MEDIA and defaults to
+    no: Apple's definition is a feed that spreads user content to many users,
+    which none of the apps released through appci has. Only an unanswered
+    question is touched, an existing answer is never changed here."""
+    raw = os.environ.get("ASC_SOCIAL_MEDIA", "false").strip().lower() or "false"
+    if raw not in ("true", "false"):
+        die(f"ASC_SOCIAL_MEDIA must be true or false, not {raw!r}")
+    social_media = raw == "true"
+
+    st, data = client.call(
+        "GET",
+        f"/v1/apps/{app_id}/appInfos",
+        params={
+            "include": "ageRatingDeclaration",
+            "fields[ageRatingDeclarations]": "socialMedia",
+        },
+    )
+    if st != 200:
+        log(f"  WARNING: could not read the age rating declaration ({err_detail(data)})")
+        return
+    declarations = {
+        d["id"]: d for d in data.get("included", []) if d["type"] == "ageRatingDeclarations"
+    }
+    for info in data.get("data", []):
+        state = (info.get("attributes") or {}).get("state")
+        rel = ((info.get("relationships") or {}).get("ageRatingDeclaration") or {}).get(
+            "data"
+        ) or {}
+        decl = declarations.get(rel.get("id"))
+        if decl is None or decl["attributes"].get("socialMedia") is not None:
+            continue
+        log(
+            f"  age rating: the social media question is unanswered on app info "
+            f"{info['id']} ({state}); answering {'yes' if social_media else 'no'}"
+        )
+        if dry_run:
+            continue
+        st, d = client.call(
+            "PATCH",
+            f"/v1/ageRatingDeclarations/{decl['id']}",
+            body={
+                "data": {
+                    "type": "ageRatingDeclarations",
+                    "id": decl["id"],
+                    "attributes": {"socialMedia": social_media},
+                }
+            },
+        )
+        if st in (200, 201):
+            log("  age rating: answered")
+        elif state in ("READY_FOR_DISTRIBUTION", "REPLACED_WITH_NEW_INFO"):
+            # The live app info is not ours to edit; the editable one is what
+            # the submission checks.
+            log(f"  age rating: left the live app info alone ({err_detail(d)})")
+        else:
+            die(f"could not answer the age rating question: {err_detail(d)}")
+
+
 def submit_for_review(client, app_id, version_id, dry_run):
     log("submitting for App Store review")
     if dry_run:
@@ -714,6 +782,7 @@ def main():
         die(f"could not find app {bundle_id}: {err_detail(data)}")
     app_id = data["data"][0]["id"]
     log(f"app {bundle_id} -> {app_id}")
+    ensure_age_rating(client, app_id, dry_run)
 
     # 2. Build.
     build_id, num, marketing = select_build(client, app_id, select, build_number)
